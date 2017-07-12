@@ -21,12 +21,14 @@ class PoloCache(object):
     Poloniex OHLC cache stored in InfluxDB.
     """
     BASE_URL = 'https://poloniex.com/public?command='
-    PERIODS = [300, 900, 1800, 7200, 14400, 86400]
+    PERIODS = [300]
 
-    def __init__(self):
+    def __init__(self, host, port):
         """
         Get list of supported assets.
         """
+        self.host = host
+        self.port = port
         self.assets = PoloCache.__get_assets()
         assert len(self.assets) > 0
 
@@ -81,40 +83,42 @@ class PoloCache(object):
         :param asset: asset name
         :return:
         """
-        host = 'localhost'
-        port = 8086
         user = 'root'
         password = 'root'
         db_name = 'poloniex'
         protocol = 'json'
 
-        client = DataFrameClient(host, port, user, password, db_name)
+        client = DataFrameClient(self.host, self.port, user, password, db_name)
         PoloCache.__create_db_if_does_not_exist(client, db_name)
 
         for period in PoloCache.PERIODS:
             t = TimeSeries()
-            polo_start = dt.datetime.strptime("01/01/2014", "%d/%m/%Y")
+            polo_start = dt.datetime.strptime("01/05/2014", "%d/%m/%Y")
 
             start_month = polo_start
             end_month = polo_start + relativedelta(months=1)
 
-            #print("Expecting %s OHLC candles for %s period." %
-            #      (str((end_month-start_month)/period), period))
-
             while end_month <= dt.datetime.now():
+                q = client.query("select * from %s where time >= '%s' and time < '%s';"
+                                 % (db_name, start_month, end_month))
+                max_candles = int((end_month-start_month).total_seconds() / period)
 
-                t.getData("%s" % asset, period, start_month, end_month)
+                import pprint
+                print("Asset %s max candles %d for period %d" % (asset, max_candles, period))
+                pprint.pprint(repr(q.raw()))
+
+                # t.getData("%s" % asset, period, start_month, end_month)
+
                 start_month = end_month
                 end_month = end_month + relativedelta(months=1)
 
-                print(len(t.data))
                 print("Writing %s to %s." % (start_month, end_month))
 
-                if len(t.data) > 1:
-                    client.write_points(t.data, db_name, protocol=protocol)
+                #if len(t.data) > 1:
+                #    client.write_points(t.data, db_name, protocol=protocol)
 
-        q = client.query("select * from %s where time" % db_name)
-        print(q)
+
+
 
     def sync(self, sync_disabled=False, sync_delisted=False, sync_frozen=False):
         """
@@ -132,11 +136,10 @@ class PoloCache(object):
 
         :raises py::class:SyncError if sync failed.
         """
-        import pprint
         for asset in self.assets:
             if self.__can_sync(asset, sync_disabled, sync_delisted, sync_frozen):
-                print asset
                 self.__sync(asset)
+                return
 
 
 class TimeSeries(object):
@@ -192,20 +195,10 @@ class TimeSeries(object):
         date = dt.datetime.fromtimestamp(int(unixdate))
         return date.strftime('%d/%m/%Y %H:%M:%S')
 
+
 def main(host='localhost', port=8086):
-    """Instantiate the connection to the InfluxDB client."""
-    user = 'root'
-    password = 'root'
-    db_name = 'poloniex'
-    protocol = 'json'
-
-    cache = PoloCache()
+    cache = PoloCache(host, port)
     cache.sync()
-    return
-
-
-    print("Delete database: " + db_name)
-    # client.drop_database(db_name)
 
 
 def parse_args():
