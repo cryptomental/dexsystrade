@@ -11,6 +11,8 @@ import time
 import datetime as dt
 import pandas as pd
 
+import pprint
+
 
 class PoloCacheError(Exception):
     pass
@@ -21,7 +23,7 @@ class PoloCache(object):
     Poloniex OHLC cache stored in InfluxDB.
     """
     BASE_URL = 'https://poloniex.com/public?command='
-    PERIODS = [300]
+    PERIODS = [300, 900, 1800, 7200, 14400, 86400]
 
     def __init__(self, host, port):
         """
@@ -29,37 +31,34 @@ class PoloCache(object):
         """
         self.host = host
         self.port = port
-        self.assets = PoloCache.__get_assets()
-        assert len(self.assets) > 0
+        self.ticker = PoloCache.__return_ticker()
+        self.pairs = self.ticker.keys()
+        print self.pairs
+        assert len(self.pairs) > 0
 
     @staticmethod
-    def __get_assets():
+    def __return_ticker():
         """
-        Return a dictionary
-        :return:
-        :rtype: tuple
-        """
-        return requests.get('%sreturnCurrencies' % PoloCache.BASE_URL).json()
+        Return Poloniex ticker.
 
-    def __can_sync(self, asset, sync_disabled, sync_delisted, sync_frozen):
+        :return: ticker
+        :rtype: json
         """
-        Decide whether to sync an asset or not.
+        return requests.get('%sreturnTicker' % PoloCache.BASE_URL).json()
 
-        :param asset: asset to sync
-        :param sync_disabled:
-        :param sync_delisted:
-        :param sync_frozen:
+    def __can_sync(self, pair, sync_frozen):
+        """
+        Decide whether to sync a pair or not.
+
+        :param pair: pair to sync
+        :param sync_frozen: sync even if frozen
 
         :return: True if to sync, False otherwise
         """
-        if bool(self.assets[asset]['disabled']) and not sync_disabled:
+        if bool(self.ticker[pair]['isFrozen']) and not sync_frozen:
             return False
-        if bool(self.assets[asset]['delisted']) and not sync_delisted:
-            return False
-        if bool(self.assets[asset]['frozen']) and not sync_frozen:
-            return False
-
-        return True
+        else:
+            return True
 
     @staticmethod
     def __create_db_if_does_not_exist(client, db_name):
@@ -76,11 +75,11 @@ class PoloCache(object):
             logging.info("Creating database: %s" % db_name)
             client.create_database(db_name)
 
-    def __sync(self, asset):
+    def __sync(self, pair):
         """
-        Sync selected asset to InfluxDb.
+        Sync selected pair to InfluxDb.
 
-        :param asset: asset name
+        :param pair: pair name e.g. BTC_ETH
         :return:
         """
         user = 'root'
@@ -89,46 +88,60 @@ class PoloCache(object):
         protocol = 'json'
 
         client = DataFrameClient(self.host, self.port, user, password, db_name)
-        PoloCache.__create_db_if_does_not_exist(client, db_name)
+
+        try:
+            PoloCache.__create_db_if_does_not_exist(client, db_name)
+        except requests.exceptions.ConnectionError:
+            raise PoloCacheError("Could not connect to InfluxDB on %s:%s" %
+                                 (self.host, self.port))
 
         for period in PoloCache.PERIODS:
             t = TimeSeries()
+            influxdb_series = "%s_%s" % (pair, period)
+
             polo_start = dt.datetime.strptime("01/05/2014", "%d/%m/%Y")
 
             start_month = polo_start
             end_month = polo_start + relativedelta(months=1)
 
             while end_month <= dt.datetime.now():
-                q = client.query("select * from %s where time >= '%s' and time < '%s';"
-                                 % (db_name, start_month, end_month))
+                q = client.query("select LAST(\"close\") from %s" % influxdb_series)
+                if q:
+                    print "Last candle cached", q[influxdb_series].index.to_series()[0]
+                    start_month = q[influxdb_series].index.to_series()[0]
+                    end_month = start_month + relativedelta(months=1)
+
+
                 max_candles = int((end_month-start_month).total_seconds() / period)
+                print("Pair %s max candles %d for period %d" % (pair, max_candles, period))
 
-                import pprint
-                print("Asset %s max candles %d for period %d" % (asset, max_candles, period))
-                pprint.pprint(repr(q.raw()))
+                q = client.query("select * from %s where time >= '%s' and time < '%s';"
+                                 % (influxdb_series, start_month, end_month))
+                if q:
+                    print("Available %d candles for %s in InfluxDB for period %d" %
+                          (len(q[influxdb_series].index), pair, period))
+                    if len(q[influxdb_series].index) > 0.9 * max_candles:
+                        print "Data already cached. Continue."
+                        start_month = end_month
+                        end_month = end_month + relativedelta(months=1)
+                        continue
 
-                # t.getData("%s" % asset, period, start_month, end_month)
+                t.getData("%s" % pair, period, start_month, end_month)
+
+                if len(t.data) > 1:
+                    print("Writing %d candles from %s to %s." % (len(t.data), start_month, end_month))
+                    client.write_points(t.data, influxdb_series, protocol=protocol)
+                else:
+                    print("No data available for this period.")
 
                 start_month = end_month
                 end_month = end_month + relativedelta(months=1)
 
-                print("Writing %s to %s." % (start_month, end_month))
-
-                #if len(t.data) > 1:
-                #    client.write_points(t.data, db_name, protocol=protocol)
-
-
-
-
-    def sync(self, sync_disabled=False, sync_delisted=False, sync_frozen=False):
+    def sync(self, sync_frozen=False):
         """
         Sync poloniex db to a local InfluxDB instance.
 
-        :param sync_disabled: sync disabled assets. Default: False
-        :type sync_disabled: bool
-        :param sync_delisted: sync delisted assets. Default: False
-        :type sync_delisted: bool
-        :param sync_frozen: sync frozen assets. Default: False
+        :param sync_frozen: sync frozen pair. Default: False
         :type sync_frozen: bool
 
         :return: number of candles inserted to InfluxDB instance
@@ -136,10 +149,10 @@ class PoloCache(object):
 
         :raises py::class:SyncError if sync failed.
         """
-        for asset in self.assets:
-            if self.__can_sync(asset, sync_disabled, sync_delisted, sync_frozen):
-                self.__sync(asset)
-                return
+        for pair in self.pairs:
+            print "Can sync", pair, self.__can_sync(pair, True)
+            if self.__can_sync(pair, True):
+                self.__sync(pair)
 
 
 class TimeSeries(object):
@@ -152,11 +165,11 @@ class TimeSeries(object):
         self.start = "None"
         self.end = "None"
 
-    def getData(self, asset, period, start, end):
+    def getData(self, pair, period, start, end):
         fields = ['date', 'open', 'low', 'high', 'close',
                   'weightedAverage', 'volume', 'quoteVolume']
 
-        url = self.build_url(asset, period, start, end)
+        url = self.build_url(pair, period, start, end)
         datapoints = requests.get(url).json()
 
         print(url)
@@ -166,8 +179,9 @@ class TimeSeries(object):
             row = []
             for fld in fields:
                 if fld == 'date':
-                    print(dtp[fld])
                     row.append(self.toDate(dtp[fld]))
+                elif fld == 'volume' or fld == 'quoteVolume':
+                    row.append(float(dtp[fld]))
                 else:
                     row.append(dtp[fld])
             data.append(row)
@@ -178,14 +192,14 @@ class TimeSeries(object):
 
         self.data = temp_df
         self.empty = False
-        self.pair = asset
+        self.pair = pair
         self.period = period
         self.start = start
         self.end = end
 
-    def build_url(self, asset, period, start, end):
-        return '%sreturnChartData&currencyPair=BTC_%s&start=%s&end=%s&period=%s' % \
-               (PoloCache.BASE_URL, asset, self.toUnix(start), self.toUnix(end), period)
+    def build_url(self, pair, period, start, end):
+        return '%sreturnChartData&currencyPair=%s&start=%s&end=%s&period=%s' % \
+               (PoloCache.BASE_URL, pair, self.toUnix(start), self.toUnix(end), period)
 
     def toUnix(self, stringdate):
         #date = dt.datetime.strptime(stringdate, "%d/%m/%Y")
