@@ -111,7 +111,6 @@ class PoloCache(object):
                     start_month = q[influxdb_series].index.to_series()[0]
                     end_month = start_month + relativedelta(months=1)
 
-
                 max_candles = int((end_month-start_month).total_seconds() / period)
                 print("Pair %s max candles %d for period %d" % (pair, max_candles, period))
 
@@ -126,9 +125,10 @@ class PoloCache(object):
                         end_month = end_month + relativedelta(months=1)
                         continue
 
-                t.getData("%s" % pair, period, start_month, end_month)
+                if (dt.datetime.now() - start_month).total_seconds() >= period:
+                    t.getData("%s" % pair, period, start_month, end_month)
 
-                if len(t.data) > 1:
+                if not t.empty and len(t.data) > 1:
                     print("Writing %d candles from %s to %s." % (len(t.data), start_month, end_month))
                     client.write_points(t.data, influxdb_series, protocol=protocol)
                 else:
@@ -170,7 +170,14 @@ class TimeSeries(object):
                   'weightedAverage', 'volume', 'quoteVolume']
 
         url = self.build_url(pair, period, start, end)
-        datapoints = requests.get(url).json()
+        max_attempts = 3
+        for i in range(1, max_attempts):
+            try:
+                datapoints = requests.get(url).json()
+                break
+            except requests.exceptions.ChunkedEncodingError as e:
+                print("%s" % e)
+                time.sleep(1)
 
         print(url)
 
@@ -180,7 +187,7 @@ class TimeSeries(object):
             for fld in fields:
                 if fld == 'date':
                     row.append(self.toDate(dtp[fld]))
-                elif fld == 'volume' or fld == 'quoteVolume':
+                elif fld in {'volume', 'quoteVolume', 'open', 'high', 'low', 'close'}:
                     row.append(float(dtp[fld]))
                 else:
                     row.append(dtp[fld])
