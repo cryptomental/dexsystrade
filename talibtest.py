@@ -10,6 +10,8 @@ import time
 import datetime as dt
 import pandas as pd
 
+from polocache import PoloCache
+
 import pprint
 
 
@@ -82,21 +84,27 @@ class TradingRule(object):
         wt1 = tci
         wt2 = SMA(wt1, 4)
 
+        oversold1 = -53
+        oversold2 = -60
+
         for idx in range(len(wt1.values)-25, len(wt1.values)-1):
             zielony = wt1.values[idx][0]
             zielony_prev = wt1.values[idx-1][0]
             czerwony = wt2.values[idx]
             czerwony_prev = wt2.values[idx-1]
 
-            pprint.pprint(zielony)      # zielony
-            pprint.pprint(czerwony)      # czerwony
+            # pprint.pprint(zielony)      # zielony
+            # pprint.pprint(czerwony)      # czerwony
             if zielony > czerwony and zielony_prev < czerwony_prev:
-                print "zielona kropka"
+                print pair, "zielona kropka", input.index[idx], zielony
+                if zielony < oversold1:
+                    print "BUY", zielony
             if zielony < czerwony and zielony_prev > czerwony_prev:
-                print "czerwona kropka"
-            pprint.pprint(input.index[idx])
+                print pair, "czerwona kropka", input.index[idx], zielony
 
 
 if __name__ == '__main__':
     t = TradingRule('localhost', 8086)
-    t.check("BTC_MAID", 14400)
+    cache = PoloCache('localhost', 8086)
+    for pair in cache.pairs:
+        t.check(pair, 14400)
